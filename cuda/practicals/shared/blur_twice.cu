@@ -39,9 +39,11 @@ void blur_twice(const double *in, double* out, int n) {
             buffer[1] = blur(block_start+1, in);
             buffer[blockDim.x+2] = blur(block_end+2, in);
         }
+    }
 
-        __syncthreads();
+    __syncthreads();
 
+    if(gid<n-4) {
         out[gi] = blur(li, buffer);
     }
 }

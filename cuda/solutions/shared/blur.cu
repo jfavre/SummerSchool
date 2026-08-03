@@ -22,9 +22,11 @@ void blur_shared_block(const double *in, double* out, int n) {
             buffer[0] = in[block_start];
             buffer[Threads+1] = in[block_start+Threads+1];
         }
+    }
 
-        __syncthreads();
+    __syncthreads();
 
+    if(gi<n-1) {
         out[gi] = 0.25*(buffer[li-1] + 2.0*buffer[li] + buffer[li+1]);
     }
 }
@@ -44,9 +46,11 @@ void blur_shared(const double *in, double* out, int n) {
             buffer[0] = in[block_start];
             buffer[blockDim.x+1] = in[block_start+blockDim.x+1];
         }
+    }
 
-        __syncthreads();
+    __syncthreads();
 
+    if(gi<n-1) {
         out[gi] = 0.25*(buffer[li-1] + 2.0*buffer[li] + buffer[li+1]);
     }
 }
