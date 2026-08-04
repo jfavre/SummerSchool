@@ -29,9 +29,11 @@ bool test_scaled_diff() {
     Field r(n,1);
 
     for(auto i=0; i<n; ++i) {
+        y[i] = 1.0;
         l[i] = 7.0;
         r[i] = 2.0;
     }
+    y.update_device();
     l.update_device();
     r.update_device();
 
@@ -95,10 +97,12 @@ bool test_add_scaled_diff() {
 
     for(auto i=0; i<n; ++i) {
         x[i] = 3.0;
+        y[i] = 1.0;
         l[i] = 7.0;
         r[i] = 2.0;
     }
     x.update_device();
+    y.update_device();
     l.update_device();
     r.update_device();
 
@@ -119,8 +123,10 @@ bool test_scale() {
 
     for(auto i=0; i<n; ++i) {
         x[i] = 3.0;
+        y[i] = 1.0;
     }
     x.update_device();
+    y.update_device();
 
     linalg::ss_scale(y, 0.5, x);
     y.update_host();
@@ -140,9 +146,11 @@ bool test_lcomb() {
 
     for(auto i=0; i<n; ++i) {
         x[i] = 3.0;
+        y[i] = 1.0;
         z[i] = 7.0;
     }
     x.update_device();
+    y.update_device();
     z.update_device();
 
     linalg::ss_lcomb(y, 0.5, x, 2.0, z);
@@ -162,9 +170,11 @@ bool test_copy() {
 
     for(auto i=0; i<n; ++i) {
         x[i] = 3.0;
+        y[i] = 1.0;
     }
 
     x.update_device();
+    y.update_device();
     linalg::ss_copy(y, x);
     y.update_host();
 
