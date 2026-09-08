@@ -1,0 +1,50 @@
+name: Test Git LFS
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!gh-readonly-queue/**'
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-on-${{ github.event_name }}-from-${{ github.ref_name }}
+  cancel-in-progress: true
+
+# Minimal permissions - only read access needed for checks
+permissions:
+  contents: read
+
+jobs:
+  test-git-lfs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check that binary files are tracked by LFS
+        id: git-lfs-check
+        run: bash brev/test-git-lfs.bash .
+
+      - name: Get PR info
+        id: get-pr-info
+        if: always() && startsWith(github.ref_name, 'pull-request/')
+        uses: nv-gha-runners/get-pr-info@main
+
+      - name: Save PR comment data
+        if: always()
+        run: |
+          mkdir -p ./pr-comment-data
+          echo '${{ steps.git-lfs-check.outputs.error_type }}' > ./pr-comment-data/error_type
+          echo '${{ steps.git-lfs-check.outputs.error_files }}' > ./pr-comment-data/error_files
+          PR_NUMBER='${{ startsWith(github.ref_name, 'pull-request/') && fromJSON(steps.get-pr-info.outputs.pr-info).number || '' }}'
+          echo "${PR_NUMBER}" > ./pr-comment-data/pr_number
+
+      - name: Upload PR comment data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-comment-data
+          path: pr-comment-data/
+          retention-days: 1

@@ -1,0 +1,123 @@
+#! /bin/bash
+#
+# Main entrypoint for all services. Creates the user if needed, then dispatches
+# to the service-specific entrypoint script.
+#
+# Usage: entrypoint.bash <service> [args...]
+#   service: base, jupyter, nsys, ncu, shell
+
+set -euo pipefail
+
+SERVICE="${1:-}"
+shift || true
+
+if [ -z "${SERVICE}" ]; then
+    echo "Error: No service specified. Usage: entrypoint.bash <service> [args...]" >&2
+    exit 1
+fi
+
+# Rootless Podman receives the host driver as individual bind-mounted files.
+# Create the soname links expected by CUDA without changing Docker entrypoints.
+if [ "${ACH_ROOTLESS_PODMAN:-}" = "1" ]; then
+    for library_link in ${ACH_NVIDIA_LIBRARY_LINKS:-}; do
+        library=${library_link%%:*}
+        soname=${library_link#*:}
+        for path in "/usr/lib/"*-linux-gnu/"${library}".so.* /usr/lib64/"${library}".so.*; do
+            if [ -f "${path}" ] && [ ! -L "${path}" ]; then
+                ln -sf "$(basename "${path}")" "$(dirname "${path}")/${soname}" 2>/dev/null || true
+                break
+            fi
+        done
+    done
+
+    if [ -n "${ACH_NVIDIA_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${ACH_NVIDIA_LIB_DIRS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    fi
+fi
+
+# Create user if running as root and user doesn't exist
+if [ "$(id -u)" = "0" ]; then
+    TARGET_USER="${ACH_USER:-ach}"
+    TARGET_UID="${ACH_UID:-1000}"
+    TARGET_GID="${ACH_GID:-1000}"
+
+    if ! id "${TARGET_USER}" &>/dev/null; then
+        # Check if a user with the target UID already exists.
+        EXISTING_USER=$(getent passwd "${TARGET_UID}" 2>/dev/null | cut -d: -f1 || true)
+        if [ -n "${EXISTING_USER}" ]; then
+            TARGET_USER="${EXISTING_USER}"
+        else
+            # Check if a group with the target GID already exists
+            EXISTING_GROUP=$(getent group "${TARGET_GID}" 2>/dev/null | cut -d: -f1 || true)
+            if [ -n "${EXISTING_GROUP}" ]; then
+                TARGET_GROUP="${EXISTING_GROUP}"
+            else
+                groupadd --gid "${TARGET_GID}" "${TARGET_USER}"
+                TARGET_GROUP="${TARGET_USER}"
+            fi
+            useradd --uid "${TARGET_UID}" --gid "${TARGET_GROUP}" --create-home --shell /bin/bash "${TARGET_USER}"
+            getent group docker &>/dev/null && usermod -aG docker "${TARGET_USER}"
+        fi
+    fi
+
+    # Export for use by service entrypoints
+    export ACH_TARGET_USER="${TARGET_USER}"
+    export ACH_TARGET_HOME=$(getent passwd "${TARGET_USER}" | cut -d: -f6 || true)
+    # Setup user environment (one-time setup, not on every shell)
+    export HOME="${ACH_TARGET_HOME}"
+
+    # Streamer containers do not include gosu. Rootless Podman deliberately
+    # uses root for a directly bind-mounted checkout, so no user switch is
+    # needed in that case.
+    if [ "${TARGET_USER}" = "$(id -un)" ]; then
+        run_as_target() { "$@"; }
+    else
+        if ! command -v gosu &> /dev/null; then
+            apt-get update -y
+            apt-get install -y gosu
+        fi
+        run_as_target() { gosu "${TARGET_USER}" "$@"; }
+    fi
+
+    # Setup Jupyter configuration directories
+    run_as_target mkdir -p "${HOME}/.jupyter"
+    run_as_target mkdir -p "${HOME}/.local/share/jupyter"
+    run_as_target mkdir -p "${HOME}/.ipython/profile_default/startup"
+    run_as_target mkdir -p "${HOME}/.local/state"
+
+    # Link Jupyter server config if not already present
+    if [ ! -e "${HOME}/.jupyter/jupyter_server_config.py" ]; then
+        run_as_target ln -sf /accelerated-computing-hub/brev/jupyter-server-config.py "${HOME}/.jupyter/jupyter_server_config.py"
+    fi
+
+    # Link IPython startup scripts if not already present
+    if [ ! -e "${HOME}/.ipython/profile_default/startup/00-add-cwd-to-path.py" ]; then
+        run_as_target ln -sf /accelerated-computing-hub/brev/ipython-startup-add-cwd-to-path.py "${HOME}/.ipython/profile_default/startup/00-add-cwd-to-path.py"
+    fi
+    # Setup Git safe directory (run as target user)
+    run_as_target git config --global --add safe.directory "/accelerated-computing-hub" 2>/dev/null || true
+
+    # Ensure logs directory exists and is writable by the target user.
+    mkdir -p /accelerated-computing-hub/logs
+    chown "${TARGET_USER}" /accelerated-computing-hub/logs
+
+    # Relax profiling permissions so Nsight tools can run as non-root.
+    sysctl -w kernel.perf_event_paranoid=0 > /dev/null 2>&1 || true
+    sysctl -w kernel.kptr_restrict=0 > /dev/null 2>&1 || true
+else
+    export ACH_TARGET_USER="${ACH_TARGET_USER:-$(id -un)}"
+    export ACH_TARGET_HOME="${ACH_TARGET_HOME:-${HOME:-}}"
+    if [ -z "${ACH_TARGET_HOME}" ]; then
+        export ACH_TARGET_HOME="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
+    fi
+    export HOME="${ACH_TARGET_HOME:-/tmp}"
+fi
+
+# Dispatch to service-specific entrypoint
+SERVICE_ENTRYPOINT="/accelerated-computing-hub/brev/entrypoint-${SERVICE}.bash"
+if [ ! -x "${SERVICE_ENTRYPOINT}" ]; then
+    echo "Error: Service entrypoint not found or not executable: ${SERVICE_ENTRYPOINT}" >&2
+    exit 1
+fi
+
+exec "${SERVICE_ENTRYPOINT}" "$@"

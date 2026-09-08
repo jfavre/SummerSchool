@@ -1,0 +1,24 @@
+# Arrays
+numpy
+
+# Dataframes
+pandas
+
+# Visualization
+matplotlib
+seaborn
+
+# Dark mode detection
+jupyter-dark-detect == 0.1.0
+
+# Downloading
+gdown
+conan
+
+# Jupyter
+jupyter
+jupyter-server-proxy
+jupyterlab-execute-time
+
+# NVIDIA devtools
+nsightful[notebook] @ git+https://github.com/brycelelbach/nsightful.git

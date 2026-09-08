@@ -1,0 +1,74 @@
+name: Test Links
+
+# Automatic link checking is disabled: the lychee-based link checks are flaky
+# (external sites intermittently time out or rate-limit, producing spurious CI
+# failures). The workflow is retained and can still be run on demand from the
+# Actions tab via "Run workflow". To check links locally, run
+# `./brev/test-links.bash .`.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-on-${{ github.event_name }}-from-${{ github.ref_name }}
+  cancel-in-progress: true
+
+# Minimal permissions - only read access needed for checks
+permissions:
+  contents: read
+
+jobs:
+  test-links:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install nbconvert
+        run: |
+          python -m pip install --upgrade pip
+          pip install nbconvert
+
+      - name: Convert all notebooks to Markdown
+        run: |
+          echo "Converting all Jupyter notebooks to markdown..."
+          find . -name "*.ipynb" -type f | while read notebook; do
+            echo "Converting: $notebook"
+            jupyter nbconvert --to markdown "$notebook"
+          done
+
+      - name: Check links with Lychee
+        id: lychee-check
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --verbose --no-progress --config brev/lychee.toml --exclude-file brev/.lycheeignore '.'
+          output: ./lychee/out.md
+          fail: true
+
+      - name: Get PR info
+        id: get-pr-info
+        if: always() && startsWith(github.ref_name, 'pull-request/')
+        uses: nv-gha-runners/get-pr-info@main
+
+      - name: Save PR comment data
+        if: always()
+        run: |
+          mkdir -p ./pr-comment-data
+          PR_NUMBER='${{ startsWith(github.ref_name, 'pull-request/') && fromJSON(steps.get-pr-info.outputs.pr-info).number || '' }}'
+          echo "${PR_NUMBER}" > ./pr-comment-data/pr_number
+          if [ -f ./lychee/out.md ]; then
+            cp ./lychee/out.md ./pr-comment-data/error_output
+          fi
+
+      - name: Upload PR comment data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-comment-data
+          path: pr-comment-data/
+          retention-days: 1

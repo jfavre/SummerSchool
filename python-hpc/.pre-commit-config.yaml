@@ -1,0 +1,40 @@
+repos:
+  - repo: local
+    hooks:
+      - id: notebook-format
+        name: Check notebook canonical format
+        entry: python3 brev/test-notebook-format.py
+        language: system
+        files: '\.ipynb$'
+
+      - id: git-lfs
+        name: Check binary files tracked by Git LFS
+        entry: bash brev/test-git-lfs.bash
+        language: system
+        files: '\.(pptx|pdf|png|jpg|jpeg|gif|webp)$'
+
+      - id: git-signatures
+        name: Check commit signatures
+        entry: bash brev/test-git-signatures.bash
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Link checking is flaky (external sites intermittently time out or
+      # rate-limit), so these hooks are manual-only and do not run on commit.
+      # Run on demand with `pre-commit run --hook-stage manual test-links`.
+      - id: test-links
+        name: Check links in changed markdown and notebooks
+        entry: bash brev/test-links.bash
+        language: system
+        files: '\.(md|ipynb)$'
+        stages: [manual]
+
+      - id: test-links-all
+        name: Check links in all markdown and notebooks
+        entry: bash brev/test-links.bash .
+        language: system
+        files: '\.(md|ipynb)$'
+        pass_filenames: false
+        stages: [manual]

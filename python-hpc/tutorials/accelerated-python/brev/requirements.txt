@@ -1,0 +1,36 @@
+# Arrays
+numpy == 2.2.6
+
+# Scientific/numeric
+scipy == 1.17.1
+matplotlib == 3.10.8
+opencv-python-headless == 4.13.0.92
+
+# Dark mode detection
+jupyter-dark-detect == 0.1.0
+
+# Jupyter
+jupyter == 1.1.1
+jupyter-server-proxy == 4.4.0
+jupyterlab == 4.5.7
+jupyterlab-execute-time == 3.3.0
+
+# CUDA
+cuda-python == 13.1.1
+nvmath-python[cu13] == 0.8.0
+cupy-cuda13x == 13.6.0
+cuda-cccl == 0.4.5
+
+# RAPIDS
+cudf-cu13 == 26.2.1
+cuml-cu13 == 26.2.0
+
+# NVIDIA developer tools
+nvtx == 0.2.14
+nsightful[notebook] @ git+https://github.com/brycelelbach/nsightful.git@454dfa5124ebea193f64302058b327f2034ccd8e
+
+# Distributed computing
+mpi4py == 4.1.1
+
+# Testing
+pytest == 9.0.3

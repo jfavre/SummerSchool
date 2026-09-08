@@ -1,0 +1,225 @@
+name: Test Git Signatures
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!gh-readonly-queue/**'
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-on-${{ github.event_name }}-from-${{ github.ref_name }}
+  cancel-in-progress: true
+
+# Minimal permissions - only read access needed for checks
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test-git-signatures:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for merge-group commit ranges
+
+      - name: Check commit signatures
+        id: signature-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execFileSync } = require('child_process');
+
+            const currentBranch = process.env.GITHUB_REF_NAME;
+            console.log(`Current branch: ${currentBranch}`);
+
+            // Main contains historical unsigned commits. Feature and event
+            // branches are checked when their commits are introduced.
+            if (currentBranch === 'main') {
+              console.log('On main branch - skipping signature check for historical commits.');
+              console.log('Signature verification only runs on PR branches.');
+              return;
+            }
+
+            const unique = values => [...new Set(values.filter(Boolean))];
+
+            const commitsForOpenPullRequests = async () => {
+              try {
+                const mirror = currentBranch.match(/^pull-request\/(\d+)$/);
+                let pulls;
+                if (mirror) {
+                  const pull = await github.rest.pulls.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: Number(mirror[1])
+                  });
+                  pulls = [pull.data];
+                } else {
+                  pulls = await github.paginate(
+                    github.rest.repos.listPullRequestsAssociatedWithCommit,
+                    {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      commit_sha: context.payload.after,
+                      per_page: 100
+                    }
+                  );
+                  pulls = pulls.filter(pull =>
+                    pull.state === 'open' && pull.head.sha === context.payload.after
+                  );
+                }
+
+                if (pulls.length === 0) {
+                  return null;
+                }
+
+                const shas = [];
+                for (const pull of pulls) {
+                  const targetOwner = pull.base.repo.owner.login;
+                  const targetRepo = pull.base.repo.name;
+                  console.log(
+                    `Checking commits from ${targetOwner}/${targetRepo}#${pull.number} ` +
+                    `(base=${pull.base.ref}).`
+                  );
+                  const commits = await github.paginate(
+                    github.rest.repos.compareCommitsWithBasehead,
+                    {
+                      owner: targetOwner,
+                      repo: targetRepo,
+                      basehead: `${pull.base.sha}...${context.payload.after}`,
+                      per_page: 100
+                    },
+                    response => response.data.commits
+                  );
+                  shas.push(...commits.map(commit => commit.sha));
+                }
+                return unique(shas);
+              } catch (error) {
+                throw new Error(`Could not determine pull-request commits: ${error.message}`);
+              }
+            };
+
+            const commitsFromPush = () => {
+              const pushed = context.payload.commits || [];
+              if (pushed.length >= 2048) {
+                throw new Error(
+                  'Push exposes 2048 commits, the event payload limit; ' +
+                  'refusing to skip signature checks.'
+                );
+              }
+              return pushed.map(commit => commit.id);
+            };
+
+            const commitsInRange = (base, head) => {
+              const shaPattern = /^[0-9a-f]{40}$/;
+              if (!shaPattern.test(base) || !shaPattern.test(head)) {
+                throw new Error(`Invalid commit range: ${base}..${head}`);
+              }
+              const output = execFileSync(
+                'git', ['rev-list', `${base}..${head}`], { encoding: 'utf-8' }
+              );
+              return output.trim().split('\n').filter(Boolean);
+            };
+
+            let commitShas = null;
+            if (context.eventName === 'push') {
+              if (context.payload.deleted) {
+                console.log('Branch deleted - no commits to check.');
+                return;
+              }
+
+              commitShas = await commitsForOpenPullRequests();
+              if (commitShas === null) {
+                if (context.payload.created) {
+                  console.log('New branch without an open PR - checking pushed commits.');
+                } else {
+                  console.log('No open PR found - checking commits introduced by this push.');
+                }
+                commitShas = commitsFromPush();
+              }
+            } else if (context.eventName === 'merge_group') {
+              const mergeGroup = context.payload.merge_group;
+              commitShas = commitsInRange(mergeGroup.base_sha, mergeGroup.head_sha);
+            } else {
+              commitShas = [process.env.GITHUB_SHA];
+            }
+
+            commitShas = unique(commitShas);
+
+            if (commitShas.length === 0) {
+              console.log('No new commits to check.');
+              return;
+            }
+
+            console.log(`Checking ${commitShas.length} commit(s) via GitHub API...`);
+
+            // Check each commit's verification status via GitHub API
+            const unsignedCommits = [];
+
+            for (const sha of commitShas) {
+              try {
+                const commit = await github.rest.repos.getCommit({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: sha
+                });
+
+                const verification = commit.data.commit.verification;
+                const shortSha = sha.substring(0, 7);
+                const message = commit.data.commit.message.split('\n')[0];
+
+                if (verification && verification.verified) {
+                  console.log(`✓ ${shortSha} - ${message} (${verification.reason})`);
+                } else {
+                  const reason = verification ? verification.reason : 'unknown';
+                  console.log(`✗ ${shortSha} - ${message} (${reason})`);
+                  unsignedCommits.push({
+                    sha: shortSha,
+                    fullSha: sha,
+                    message: message,
+                    reason: reason
+                  });
+                }
+              } catch (error) {
+                core.setFailed(
+                  `Could not verify ${sha.substring(0, 7)} via GitHub API: ${error.message}`
+                );
+                return;
+              }
+            }
+
+            if (unsignedCommits.length > 0) {
+              // Set outputs for PR comment workflow
+              core.setOutput('unsigned_count', unsignedCommits.length);
+              core.setOutput('unsigned_commits', unsignedCommits.map(c => `- \`${c.sha}\`: ${c.message} (${c.reason})`).join('\n'));
+
+              console.log('\n❌ Found unsigned commits:');
+              for (const commit of unsignedCommits) {
+                console.log(`   ${commit.sha}: ${commit.message} (reason: ${commit.reason})`);
+              }
+              console.log('\nAll commits must be signed. See the PR comments for instructions on how to sign commits.');
+              console.log('You can re-sign commits with: git rebase -i HEAD~N --exec "git commit --amend --no-edit -S"');
+              core.setFailed(`${unsignedCommits.length} unsigned commit(s) found. All commits must be signed.`);
+            } else {
+              console.log(`\n✅ All ${commitShas.length} commit(s) are properly signed.`);
+            }
+
+      - name: Save PR comment data
+        if: always()
+        run: |
+          mkdir -p ./pr-comment-data
+          echo '${{ steps.signature-check.outputs.unsigned_count }}' > ./pr-comment-data/unsigned_count
+          cat << 'EOF' > ./pr-comment-data/unsigned_commits
+          ${{ steps.signature-check.outputs.unsigned_commits }}
+          EOF
+
+      - name: Upload PR comment data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-comment-data
+          path: pr-comment-data/
+          retention-days: 1

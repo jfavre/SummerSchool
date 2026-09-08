@@ -1,0 +1,111 @@
+name: PR Comment on Notebook Format Check
+
+on:
+  workflow_run:
+    workflows: ["Test Notebook Format"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.pull_requests[0] || startsWith(github.event.workflow_run.head_branch, 'pull-request/'))
+
+    steps:
+      - name: Download PR comment data
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-comment-data
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Post comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const pullRequests = context.payload.workflow_run.pull_requests;
+            let prNumber;
+            if (pullRequests && pullRequests.length > 0) {
+              prNumber = pullRequests[0].number;
+            } else {
+              try {
+                prNumber = parseInt(fs.readFileSync('pr_number', 'utf8').trim());
+              } catch (e) {
+                console.log('No PR number found, skipping comment.');
+                return;
+              }
+            }
+            if (!prNumber || isNaN(prNumber)) {
+              console.log('No valid PR number found, skipping comment.');
+              return;
+            }
+
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${{ github.event.workflow_run.id }}`;
+
+            let errorDetails = '';
+            try {
+              const raw = fs.readFileSync('error_output', 'utf8').trim();
+              if (raw) {
+                errorDetails = raw.length > 30000 ? raw.substring(0, 30000) + '\n\n... (truncated)' : raw;
+              }
+            } catch (e) {}
+
+            const detailsSection = errorDetails
+              ? `\n<details>\n<summary>Notebooks with issues</summary>\n\n\`\`\`\n${errorDetails}\n\`\`\`\n\n</details>\n`
+              : '';
+
+            const commentBody = `
+            ## ❌ Notebook Format Check Failed
+
+            🔗 [View workflow run logs](${runUrl})
+            ${detailsSection}
+            ### How to fix:
+
+            \`\`\`bash
+            # Auto-fix all issues
+            python3 brev/test-notebook-format.py --fix
+
+            # Auto-fix a specific tutorial
+            python3 brev/test-notebook-format.py <tutorial-name> --fix
+            \`\`\`
+
+            📚 [nbformat documentation](https://nbformat.readthedocs.io/)
+            `.replace(/^ {12}/gm, '').trim();
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Notebook Format Check Failed')
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+              console.log(`Updated existing comment on PR #${prNumber}`);
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: commentBody
+              });
+              console.log(`Created comment on PR #${prNumber}`);
+            }

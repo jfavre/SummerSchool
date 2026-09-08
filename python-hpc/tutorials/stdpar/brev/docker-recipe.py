@@ -1,0 +1,167 @@
+"""
+HPCCM development container for the stdpar C++ and Fortran tutorials
+https://github.com/NVIDIA/hpc-container-maker/
+"""
+
+import platform
+from hpccm.primitives import raw
+
+tutorial = 'stdpar'
+ubuntu_ver = '22.04'
+nvhpc_ver = '24.3'
+cuda_ver = '12.3'
+gcc_ver = '13'
+llvm_ver = '18'
+cmake_ver = '3.27.2'
+boost_ver = '1.75.0'
+# Pin stdexec to a commit that is known to compile with the nvc++ from NVHPC 24.3.
+# Newer stdexec revisions on `main` use constructs (e.g. the `__msplice_v` variable
+# template in `__typeinfo.hpp`) that crash the nvc++ 24.3 EDG front-end with a
+# catastrophic internal error, which breaks the Lab 2 senders & receivers exercise.
+# This commit (2026-01-08) is the most recent revision that still both compiles on
+# nvc++ 24.3 (multicore and gpu) and exposes the `stdexec::on(sch, sender)` API the
+# tutorial uses. Bump this together with `nvhpc_ver`.
+stdexec_commit = '433dc54f93ab503b5595c2c7c047c8e9b80b62bd'
+arch = platform.machine()
+
+Stage0 += baseimage(image=f'nvcr.io/nvidia/nvhpc:{nvhpc_ver}-devel-cuda{cuda_ver}-ubuntu{ubuntu_ver}')
+
+Stage0 += environment(variables={
+  'ACH_STDPAR_NVHPC_VERSION': nvhpc_ver,
+  'ACH_STDPAR_CUDA_VERSION': cuda_ver,
+  'ACH_STDPAR_ARCH': arch,
+
+  'ACPP_APPDB_DIR': '/accelerated-computing-hub/',
+
+  'ACH_NSYS_PATH': f'/opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/bin/nsys',
+  'ACH_NCU_PATH':  f'/opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/bin/ncu',
+
+  'PATH':            '/accelerated-computing-hub/brev/wrappers:$PATH:/opt/adaptivecpp/bin',
+  'LD_LIBRARY_PATH': f'/usr/lib/llvm-{llvm_ver}/lib:$LD_LIBRARY_PATH',
+  'LIBRARY_PATH':    f'/usr/lib/llvm-{llvm_ver}/lib:$LIBRARY_PATH',
+
+  # Silence pip warnings about running as root
+  'PIP_ROOT_USER_ACTION': 'ignore',
+
+  # Simplify running HPC-X on systems without InfiniBand
+  'OMPI_MCA_coll_hcoll_enable': '0',
+
+  # We do not need VFS for the exercises, and using it from a container in a 'generic' way is not trivial:
+  'UCX_VFS_ENABLE': 'n',
+
+  # Suppress warnings about UCX `cuda_copy` failures.
+  'UCX_LOG_LEVEL': 'warn',
+
+  # Allow HPC-X to oversubscribe the CPU with more ranks than cores without using mpirun --oversubscribe
+  'OMPI_MCA_rmaps_base_oversubscribe' : 'true',
+
+  # Select matplotdir config directory to silence warning
+  'MPLCONFIGDIR': '/tmp/matplotlib',
+
+  # Allow OpenMPI to run as root:
+  'OMPI_ALLOW_RUN_AS_ROOT': '1',
+  'OMPI_ALLOW_RUN_AS_ROOT_CONFIRM': '1',
+
+  # Workaround hwloc binding:
+  'OMPI_MCA_hwloc_base_binding_policy': 'none',
+
+  # Workaround nvfortran limit of 64k thread blocks
+  'NVCOMPILER_ACC_GANGLIMIT': '67108864', # (1 << 26)
+})
+
+Stage0 += packages(ospackages=[
+  'libtbb-dev',  # Required for GCC C++ parallel algorithms
+  'python3', 'python3-pip', 'python-is-python3', 'python3-setuptools', 'python3-dev',
+  'make', 'build-essential', 'git', 'git-lfs',
+  'curl', 'wget', 'zip', 'bc',
+  'nginx', 'openssh-client',
+  'libnuma1',  'numactl',
+  'gosu', 'sudo',
+])
+Stage0 += boost(version=boost_ver) # Required for AdaptiveCpp
+
+# Install GNU and LLVM toolchains
+Stage0 += gnu(version=gcc_ver, extra_repository=True)
+Stage0 += llvm(version=llvm_ver, upstream=True, extra_tools=True, toolset=True, _trunk_version='19')
+
+# Patch libstdc++ to use our modified cartesian_product view that doesn't require HMM/ATS and copies
+# the underlying range iterators instead of accessing them through host memory. This must be done
+# after GCC is installed.
+Stage0 += copy(src='tutorials/stdpar/include/ach/cartesian_product.hpp', dest='/usr/include/ach/cartesian_product.hpp')
+Stage0 += copy(src='tutorials/stdpar/include/ranges', dest=f'/usr/include/c++/{gcc_ver}/ranges')
+
+# Install CMake
+Stage0 += cmake(eula=True, version=cmake_ver)
+
+# Copy only requirements.txt first for better Docker layer caching.
+Stage0 += copy(src=f'tutorials/{tutorial}/brev/requirements.txt', dest='/opt/requirements.txt')
+
+Stage0 += shell(commands=[
+  'set -ex',  # Exit on first error and debug output
+
+  # Configure the HPC SDK toolchain to pick the latest GCC
+  f'cd /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/bin/',
+  'makelocalrc -d . -x .',
+  'cd -',
+
+  # Install Python packages
+  'pip install --no-cache-dir --upgrade pip',
+  'pip install --no-cache-dir --root-user-action=ignore -r /opt/requirements.txt',
+  'rm -f /opt/requirements.txt',
+
+  # Build and install AdaptiveCpp
+  'git clone --depth=1 --shallow-submodules --recurse-submodules -b develop https://github.com/AdaptiveCpp/AdaptiveCpp',
+  'cd AdaptiveCpp',
+  'git submodule update --recursive',
+  f'cmake -Bbuild -H.  -DCMAKE_C_COMPILER="$(which clang-{llvm_ver})" -DCMAKE_CXX_COMPILER="$(which clang++-{llvm_ver})" -DCMAKE_INSTALL_PREFIX=/opt/adaptivecpp -DWITH_CUDA_BACKEND=ON -DWITH_CPU_BACKEND=ON',
+  'cmake --build build --target install -j $(nproc)',
+  'cd -',
+  'rm -rf AdaptiveCpp',
+
+  # Install latest versions of range-v3 and NVIDIA's std::execution implementation
+  'git clone --depth=1 https://github.com/ericniebler/range-v3.git',
+  'cp -r range-v3/include/* /usr/include/',
+  'rm -rf range-v3',
+  # NOTE: stdexec is pinned (see `stdexec_commit` above) because newer revisions
+  #       crash the nvc++ 24.3 front-end. Fetch just the pinned commit to keep the
+  #       checkout shallow.
+  'git init stdexec',
+  'cd stdexec',
+  'git remote add origin https://github.com/nvidia/stdexec.git',
+  f'git fetch --depth=1 origin {stdexec_commit}',
+  'git checkout FETCH_HEAD',
+  'cd -',
+  'cp -r stdexec/include/* /usr/include/',
+  'rm -rf stdexec',
+
+  # libc++abi: make sure clang with -stdlib=libc++ can find it
+  f'ln -sf /usr/lib/llvm-{llvm_ver}/lib/libc++abi.so.1 /usr/lib/llvm-{llvm_ver}/lib/libc++abi.so',
+
+  # Make mdspan use the paren operator for C++20 compatibility and put it in the std namespace
+  f'echo "#define MDSPAN_USE_PAREN_OPERATOR 1"|cat - /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/include/experimental/mdspan > /tmp/out && mv /tmp/out /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/include/experimental/mdspan',
+  f'echo "namespace std {{ using namespace ::std::experimental; }}" >> /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/include/experimental/mdspan',
+
+  # Install the NVIDIA HPC SDK mdspan systemwide:
+  f'ln -sf /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/include/experimental/mdspan /usr/include/mdspan',
+  f'ln -sf /opt/nvidia/hpc_sdk/Linux_{arch}/{nvhpc_ver}/compilers/include/experimental/__p0009_bits /usr/include/__p0009_bits',
+
+  # Put the include directory in the systemwide path:
+  f'ln -sf /accelerated-computing-hub/tutorials/stdpar/include/ach /usr/include/ach',
+
+  # Disable unnecessary default Jupyter extensions.
+  'python -m jupyter labextension disable "@jupyterlab/apputils-extension:announcements"',
+  'python -m jupyter labextension disable "@jupyterlab/console-extension:tracker"',
+])
+
+# Enable passwordless sudo for all users and pass through environment and path
+Stage0 += shell(commands=[
+  "echo 'ALL ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers",
+  "sed -i -e 's/^Defaults\\s*env_reset/#&/' -e 's/^Defaults\\s*secure_path=/#&/' /etc/sudoers",
+])
+
+
+Stage0 += raw(docker='COPY --chmod=0777 . /accelerated-computing-hub')
+
+Stage0 += workdir(directory=f'/accelerated-computing-hub/tutorials/{tutorial}/notebooks')
+
+Stage0 += raw(docker='ENTRYPOINT ["/accelerated-computing-hub/brev/entrypoint.bash", "jupyter"]')
