@@ -1,4 +1,10 @@
+# DISCLAIMER
+
+- Tutorial presented by Bryce Lelbach (@brycelelbach) and Aaron Jomy (aaronj0)
+- Original content: https://github.com/NVIDIA/accelerated-computing-hub
+
 # NVIDIA Accelerated Computing Hub
+
 
 This repository is a home for open learning materials related to GPU computing.  You will find user guides, tutorials, and other works freely available for all learners interested in GPU computing.
 
