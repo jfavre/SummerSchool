@@ -19,7 +19,8 @@ We will be using Slack to post news and links relevant to the event: you should 
 ## Link to materials
 
 - [CUDA](./cuda) 
-- [Python HPC](./python-hpc) 
+- [Python HPC](./python-hpc)
+- [Keynote presentations](./keynote) 
 
 ## Setting up the course accounts
 - https://docs.cscs.ch/guides/course-account/
