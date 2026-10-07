@@ -17,17 +17,34 @@ void fill_gpu(T *v, T value, int n);
 
 void write_to_file(int nx, int ny, double* data);
 
+#ifdef USE_ASCENT
+#include "AscentAdaptor.h"
+#endif
+
+#ifdef USE_CATALYST
+#include "CatalystAdaptor.h"
+#endif
+
+#ifdef USE_VTKM
+#include "VTKmAdaptor.h"
+#endif
+
+#ifdef USE_VISKORES
+#include "ViskoresAdaptor.h"
+#endif
+
 __global__
-void diffusion(double *x0, double *x1, int nx, int ny, double dt) {
-// TODO : implement stencil using 2d launch configuration
-// NOTE : i-major ordering, i.e. x[i,j] is indexed at location [i+j*nx]
-//  for(i=1; i<nx-1; ++i) {
-//    for(j=1; j<ny-1; ++j) {
-//        x1[i,j] = x0[i,j] + dt * (-4.*x0[i,j]
-//                   + x0[i,j-1] + x0[i,j+1]
-//                   + x0[i-1,j] + x0[i+1,j]);
-//    }
-//  }
+void diffusion(const double *x0, double *x1, int nx, int ny, double dt) {
+    int i = threadIdx.x + blockDim.x*blockIdx.x + 1;
+    int j = threadIdx.y + blockDim.y*blockIdx.y + 1;
+
+    if (i<nx-1 && j<ny-1) {
+        int pos = nx*j + i;
+          x1[pos] = x0[pos] + dt * (-4.*x0[pos]
+                     + x0[pos-1] + x0[pos+1]
+                     + x0[pos-nx] + x0[pos+nx]);
+
+    }
 }
 
 int main(int argc, char** argv) {
@@ -35,11 +52,11 @@ int main(int argc, char** argv) {
     // first argument is the y dimension = 2^arg
     size_t pow    = read_arg(argc, argv, 1, 8);
     // second argument is the number of time steps
-    size_t nsteps = read_arg(argc, argv, 2, 100);
+    size_t nsteps = read_arg(argc, argv, 2, 5001);
 
     // set domain size
-    size_t nx = 128+2;
     size_t ny = (1 << pow)+2;
+    size_t nx = ny;
     double dt = 0.1;
 
     std::cout << "\n## " << nx << "x" << ny
@@ -56,7 +73,7 @@ int main(int argc, char** argv) {
 
     // set initial conditions of 0 everywhere
     fill_gpu(x0, 0., buffer_size);
-    fill_gpu(x1, 0., buffer_size);
+    //fill_gpu(x1, 0., buffer_size); // no need to initialize x1. Will be set at the first timestep
 
     // set boundary conditions of 1 on south border
     fill_gpu(x0, 1., nx);
@@ -68,19 +85,90 @@ int main(int argc, char** argv) {
     cuda_stream copy_stream{};
     auto start_event = stream.enqueue_event();
 
+    // grid and block config
+    auto find_num_blocks = [](int x, int bdim) {return (x+bdim-1)/bdim;};
+    dim3 block_dim(16, 16);
+    int nbx = find_num_blocks(nx-2, block_dim.x);
+    int nby = find_num_blocks(ny-2, block_dim.y);
+    dim3 grid_dim(nbx, nby);
+    
+#ifdef USE_ASCENT
+#ifdef ASCENT_CUDA_ENABLED
+    AscentAdaptor::Initialize(x1, nx, ny);
+#else
+    AscentAdaptor::Initialize(x_host, nx, ny);
+#endif
+#endif
+
+#ifdef USE_VTKM
+    vtkm::cont::Initialize(argc, argv);
+    VTKmAdaptor::Initialize(nx, ny);
+#endif
+
+#ifdef USE_VISKORES
+    viskores::cont::Initialize(argc, argv);
+    ViskoresAdaptor::Initialize(nx, ny);
+#endif
+
+#ifdef USE_CATALYST
+    if(argc == 4)
+      {
+      CatalystAdaptor::InitializeCatalyst(argv[3]);
+      CatalystAdaptor::CreateConduitNode(x1, nx, ny);
+      }
+    else
+      {
+      std::cerr << "missing a Python Catalyst script as 3rd argument\n";
+      exit(-1);
+      }
+#endif
+
     // time stepping loop
     for(auto step=0; step<nsteps; ++step) {
-        // TODO: launch the diffusion kernel in 2D
+        diffusion<<<grid_dim, block_dim>>>(x0, x1, nx, ny, dt);
 
+        if(!(step % 2000))
+          {
+#ifdef USE_ASCENT
+#ifndef ASCENT_CUDA_ENABLED
+          copy_to_host<double>(x1, x_host, buffer_size); // use x1 with most recent result
+#endif
+          AscentAdaptor::Execute(step, dt);
+#endif
+
+#ifdef USE_CATALYST
+          CatalystAdaptor::Execute(step, dt);
+#endif
+
+#ifdef USE_VTKM
+        VTKmAdaptor::Execute(step, x1, nx*ny); //execute every 1000 steps;
+#endif
+#ifdef USE_VISKORES
+        ViskoresAdaptor::Execute(step, x1, nx*ny); //execute every 1000 steps;
+#endif
+          }
         std::swap(x0, x1);
     }
     auto stop_event = stream.enqueue_event();
     stop_event.wait();
 
     copy_to_host<double>(x0, x_host, buffer_size);
-
+    cudaFree(x0);
+    cudaFree(x1);
+    
     double time = stop_event.time_since(start_event);
-
+#ifdef USE_ASCENT
+    AscentAdaptor::Finalize();
+#endif
+#ifdef USE_CATALYST
+    CatalystAdaptor::Finalize();
+#endif
+#ifdef USE_VTKM
+    VTKmAdaptor::Finalize();
+#endif
+#ifdef USE_VISKORES
+    ViskoresAdaptor::Finalize();
+#endif
     std::cout << "## " << time << "s, "
               << nsteps*(nx-2)*(ny-2) / time << " points/second"
               << std::endl << std::endl;
